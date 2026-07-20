@@ -21,6 +21,11 @@ jobs:
         with:
           gradle-version: "8.7"
 
+      - name: Verify source files exist
+        run: |
+          test -f app/src/main/java/com/islandyout/tapforge/MainActivity.kt || { echo "MISSING MainActivity.kt"; exit 1; }
+          test -f app/src/main/java/com/islandyout/tapforge/ClickerService.kt || { echo "MISSING ClickerService.kt"; exit 1; }
+
       - name: Build debug APK
         run: |
           find . -path "*/src/main/res/*" -type f ! -name "*.xml" ! -name "*.png" ! -name "*.webp" ! -name "*.jpg" -delete
