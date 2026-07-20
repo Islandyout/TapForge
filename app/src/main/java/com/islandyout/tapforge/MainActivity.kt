@@ -117,22 +117,41 @@ class MainActivity : Activity() {
             ShizukuBridge.requestPermission()
         })
 
-        col.addView(button("4 · Test recording path (diagnostic)", false) {
-            shSt.text = "Probing touchscreen\u2026"
+        col.addView(button("4 · Capture raw events (tap 3x after pressing)", false) {
+            shSt.text = "Capturing 5s \u2014 TAP THE SCREEN a few times NOW\u2026"
             shSt.setTextColor(0xFFE0C43B.toInt())
+            shSt.textSize = 12f
             Thread {
-                val dev = ShizukuBridge.findTouchDevice()
-                runOnUiThread {
-                    if (dev != null) {
-                        shSt.text = "READY \u2713  touch device: " + dev + "\n" +
-                            "Recording will use the no-overlay Shizuku path. " +
-                            "Show the controller (button 2), press \u23FA, play normally, press \u23F9 to save."
-                        shSt.setTextColor(0xFF38E07B.toInt())
-                    } else {
-                        shSt.text = "Touch device still not found. Tap button 4 again once, " +
-                            "and if it persists, send a screenshot."
-                        shSt.setTextColor(0xFFE05B5B.toInt())
+                val dev = ShizukuBridge.findTouchDevice() ?: "/dev/input/event5"
+                val ranges = ShizukuBridge.exec("getevent -pl $dev")
+                val sid = ShizukuBridge.startStream("getevent -lt $dev")
+                val sb = StringBuilder()
+                if (sid >= 0) {
+                    val end = System.currentTimeMillis() + 5000
+                    while (System.currentTimeMillis() < end) {
+                        sb.append(ShizukuBridge.readStream(sid))
+                        try { Thread.sleep(100) } catch (_: InterruptedException) {}
                     }
+                    ShizukuBridge.stopStream(sid)
+                }
+                val cap = sb.toString()
+                // pull the X/Y max lines out of ranges for the report
+                val mx = Regex("ABS_MT_POSITION_X.*?max\\s+(\\d+)").find(ranges)?.groupValues?.get(1) ?: "?"
+                val my = Regex("ABS_MT_POSITION_Y.*?max\\s+(\\d+)").find(ranges)?.groupValues?.get(1) ?: "?"
+                val wpx = resources.displayMetrics.widthPixels
+                val hpx = resources.displayMetrics.heightPixels
+                // keep only position / btn / tracking lines to stay readable
+                val filtered = cap.lineSequence().filter {
+                    it.contains("ABS_MT_POSITION") || it.contains("BTN_TOUCH") ||
+                    it.contains("TRACKING_ID") || it.contains("ABS_MT_SLOT")
+                }.take(24).joinToString("\n")
+                runOnUiThread {
+                    shSt.text = "CAPTURE (send screenshot)\n" +
+                        "dev=" + dev + "  screen=" + wpx + "x" + hpx + "\n" +
+                        "rawMaxX=" + mx + " rawMaxY=" + my + "\n" +
+                        "events captured: " + (cap.length) + " chars\n\n" +
+                        (if (filtered.isBlank()) "(NO position/touch events seen \u2014 tap during capture!)" else filtered)
+                    shSt.setTextColor(if (filtered.isBlank()) 0xFFE05B5B.toInt() else 0xFFCFE8D8.toInt())
                 }
             }.apply { isDaemon = true; start() }
         })
