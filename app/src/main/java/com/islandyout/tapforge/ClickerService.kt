@@ -394,11 +394,27 @@ class ClickerService : AccessibilityService() {
         recStartTime = System.currentTimeMillis()
         recLastEventStart = recStartTime
 
-        if (ShizukuBridge.hasPermission()) {
-            startRawRecording()
-        } else {
-            startOverlayRecording()
-        }
+        // Decide the path by actually testing Shizuku on a background thread,
+        // not by trusting checkSelfPermission() (unreliable from this service's
+        // process). Show the record UI immediately, then switch to raw mode if
+        // the shell test passes.
+        recording = true
+        recordBtn.text = "⏹"
+        recordBtn.setTextColor(ACCENT)
+        Toast.makeText(this, "Checking Shizuku…", Toast.LENGTH_SHORT).show()
+
+        Thread {
+            val shellWorks = ShizukuBridge.canRunShell()
+            handler.post {
+                if (!recording) return@post
+                if (shellWorks) {
+                    startRawRecording()
+                } else {
+                    Toast.makeText(this, "Shizuku unavailable in service — using overlay. Screen will tint.", Toast.LENGTH_LONG).show()
+                    startOverlayRecording()
+                }
+            }
+        }.apply { isDaemon = true; start() }
     }
 
     /** Shizuku path: reads raw touches from the kernel, no overlay — game stays visible and playable. */
@@ -420,9 +436,6 @@ class ClickerService : AccessibilityService() {
         )
         rawRecorder = recorder
         recorder.start()
-        recording = true
-        recordBtn.text = "⏹"
-        recordBtn.setTextColor(ACCENT)
         Toast.makeText(this, "Recording via Shizuku — play normally, screen stays live. Press ⏹ when done.", Toast.LENGTH_LONG).show()
         handler.postDelayed(recordingSafetyStop, 120_000L)
     }
