@@ -16,10 +16,6 @@ import java.util.concurrent.TimeUnit
  * touch events from /dev/input/eventX via `getevent`, which works without any
  * on-screen overlay, so the app underneath is fully visible and responsive
  * while you play/record.
- *
- * Every Shizuku call is wrapped: the binder may be absent, an old version, or
- * throw IllegalStateException if called before it's ready. We never let those
- * escape — the app must degrade gracefully to the overlay path.
  */
 object ShizukuBridge {
 
@@ -118,6 +114,20 @@ object ShizukuBridge {
         }
     }
 
+    /**
+     * The real test: actually try to run a trivial command through the bound
+     * UserService. Trusting checkSelfPermission() alone is unreliable from a
+     * secondary process (e.g. the accessibility service) where the binder-
+     * received callback may not have fired. Call off the main thread.
+     */
+    fun canRunShell(): Boolean {
+        return try {
+            exec("echo tapforge_ok").contains("tapforge_ok")
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     fun tap(x: Int, y: Int) {
         exec("input tap $x $y")
     }
@@ -150,10 +160,7 @@ object ShizukuBridge {
 
     /**
      * Finds the touchscreen's /dev/input/eventX path by scanning `getevent -i`
-     * output for a device that reports ABS_MT_POSITION_X. Device paths vary by
-     * phone, so this is detected at runtime. Tracks the "current device" as the
-     * scanner walks each device block, and returns the one whose capability
-     * block contains the multitouch X axis.
+     * output for a device that reports ABS_MT_POSITION_X.
      */
     fun findTouchDevice(): String? {
         val listing = exec("getevent -i")
@@ -161,7 +168,6 @@ object ShizukuBridge {
         var currentDevice: String? = null
         for (raw in listing.lineSequence()) {
             val t = raw.trim()
-            // e.g. "add device 1: /dev/input/event3"
             if (t.startsWith("add device")) {
                 val path = t.substringAfter(":", "").trim()
                 currentDevice = if (path.startsWith("/dev/input/")) path else null
