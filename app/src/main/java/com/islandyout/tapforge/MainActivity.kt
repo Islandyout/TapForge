@@ -118,23 +118,19 @@ class MainActivity : Activity() {
         })
 
         col.addView(button("4 · Test Shizuku shell (diagnostic)", false) {
-            shSt.text = "Testing shell\u2026"
+            shSt.text = "Probing input devices\u2026"
             shSt.setTextColor(0xFFE0C43B.toInt())
             Thread {
-                val ping = try { Shizuku.pingBinder() } catch (t: Throwable) { false }
-                val perm = ShizukuBridge.hasPermission()
-                val echo = ShizukuBridge.exec("echo tapforge_ok")
-                val dev = ShizukuBridge.findTouchDevice()
-                val getev = if (dev != null) ShizukuBridge.exec("getevent -i " + dev).take(60) else "(no device)"
+                val lsDev = ShizukuBridge.exec("ls -l /dev/input/")
+                val geteventI = ShizukuBridge.exec("getevent -i")
+                val geteventP = ShizukuBridge.exec("getevent -pl")
                 runOnUiThread {
-                    val ok = echo.contains("tapforge_ok")
-                    shSt.text = "DIAGNOSTIC\n" +
-                        "pingBinder: " + ping + "\n" +
-                        "hasPermission: " + perm + "\n" +
-                        "echo result: " + echo.trim().take(80) + "\n" +
-                        "touch device: " + (dev ?: "NOT FOUND") + "\n" +
-                        "getevent -i: " + getev.replace("\n"," ").trim()
-                    shSt.setTextColor(if (ok) 0xFF38E07B.toInt() else 0xFFE05B5B.toInt())
+                    shSt.text = "RAW PROBE (send screenshot)\n\n" +
+                        "ls /dev/input:\n" + lsDev.take(400) + "\n\n" +
+                        "getevent -i (first 400):\n" + geteventI.take(400) + "\n\n" +
+                        "getevent -pl (first 500):\n" + geteventP.take(500)
+                    shSt.setTextColor(0xFFCFE8D8.toInt())
+                    shSt.textSize = 11f
                 }
             }.apply { isDaemon = true; start() }
         })
