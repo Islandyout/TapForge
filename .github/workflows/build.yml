@@ -23,7 +23,7 @@ jobs:
 
       - name: Build debug APK
         run: |
-          find . -path "*/res/*" -name "Test" -type f -delete
+          find . -path "*/src/main/res/*" -type f ! -name "*.xml" ! -name "*.png" ! -name "*.webp" ! -name "*.jpg" -delete
           rm -rf app/src/main/res/XML
           cd "$(dirname "$(find . -name settings.gradle.kts | head -1)")"
           gradle assembleDebug --no-daemon
