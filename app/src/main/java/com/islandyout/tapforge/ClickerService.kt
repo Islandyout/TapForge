@@ -417,14 +417,36 @@ class ClickerService : AccessibilityService() {
 
         wm.addView(overlay, p)
         recordOverlay = overlay
+
+        // Re-add the controller on top of the record overlay so ⏹ (and every
+        // other button) stays reachable while recording is active. Without
+        // this the full-screen overlay sits above the controller and eats
+        // all touches, including the stop button — locking the screen.
+        controllerView?.let { cv ->
+            try { wm.removeView(cv) } catch (_: Exception) {}
+            try { wm.addView(cv, (cv.layoutParams as WindowManager.LayoutParams)) } catch (_: Exception) {}
+        }
+
         recording = true
         recordBtn.text = "⏹"
         recordBtn.setTextColor(ACCENT)
         Toast.makeText(this, "Recording — tap/hold/swipe on screen. Press ⏹ when done.", Toast.LENGTH_LONG).show()
+
+        // Safety valve: never let recording (and the blocking overlay) run
+        // forever if something goes wrong — auto-stop after 2 minutes.
+        handler.postDelayed(recordingSafetyStop, 120_000L)
+    }
+
+    private val recordingSafetyStop = Runnable {
+        if (recording) {
+            Toast.makeText(this, "Recording auto-stopped after 2 min", Toast.LENGTH_LONG).show()
+            stopRecording()
+        }
     }
 
     private fun stopRecording() {
         recording = false
+        handler.removeCallbacks(recordingSafetyStop)
         recordOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         recordOverlay = null
         recordBtn.text = "⏺"
@@ -605,6 +627,7 @@ class ClickerService : AccessibilityService() {
 
     override fun onDestroy() {
         stopRun()
+        handler.removeCallbacks(recordingSafetyStop)
         recordOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         targets.forEach { it.remove() }
         panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
