@@ -117,6 +117,28 @@ class MainActivity : Activity() {
             ShizukuBridge.requestPermission()
         })
 
+        col.addView(button("4 · Test Shizuku shell (diagnostic)", false) {
+            shSt.text = "Testing shell\u2026"
+            shSt.setTextColor(0xFFE0C43B.toInt())
+            Thread {
+                val ping = try { Shizuku.pingBinder() } catch (t: Throwable) { false }
+                val perm = ShizukuBridge.hasPermission()
+                val echo = ShizukuBridge.exec("echo tapforge_ok")
+                val dev = ShizukuBridge.findTouchDevice()
+                val getev = if (dev != null) ShizukuBridge.exec("getevent -i " + dev).take(60) else "(no device)"
+                runOnUiThread {
+                    val ok = echo.contains("tapforge_ok")
+                    shSt.text = "DIAGNOSTIC\n" +
+                        "pingBinder: " + ping + "\n" +
+                        "hasPermission: " + perm + "\n" +
+                        "echo result: " + echo.trim().take(80) + "\n" +
+                        "touch device: " + (dev ?: "NOT FOUND") + "\n" +
+                        "getevent -i: " + getev.replace("\n"," ").trim()
+                    shSt.setTextColor(if (ok) 0xFF38E07B.toInt() else 0xFFE05B5B.toInt())
+                }
+            }.apply { isDaemon = true; start() }
+        })
+
         val help = TextView(this)
         help.text = "\nHow to use\n\n" +
             "▶  start / pause the loop\n" +
