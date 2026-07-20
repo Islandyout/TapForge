@@ -12,19 +12,14 @@ import java.util.concurrent.TimeUnit
  * Thin wrapper around Shizuku: permission handling + running shell commands
  * through a bound UserService running with shell privilege.
  *
- * Shizuku.newProcess() — the old direct way to run a shell command — was
- * made private/internal in newer Shizuku-API versions (the maintainers want
- * everyone using UserService instead: https://github.com/RikkaApps/Shizuku-API).
- * So instead we bind ShellUserService (see IShellService.aidl +
- * ShellUserService.kt), which runs inside Shizuku's privileged process and
- * exposes exec/startStream/readStream over Binder.
+ * Playback uses `input tap` / `input swipe` via shell. Recording reads raw
+ * touch events from /dev/input/eventX via `getevent`, which works without any
+ * on-screen overlay, so the app underneath is fully visible and responsive
+ * while you play/record.
  *
- * Playback uses `input tap` / `input swipe` via shell — more reliable and
- * less detectable than AccessibilityService.dispatchGesture().
- *
- * Recording reads raw touch events from /dev/input/eventX via `getevent`,
- * which works without any on-screen overlay, so the app underneath is
- * fully visible and responsive while you play/record.
+ * Every Shizuku call is wrapped: the binder may be absent, an old version, or
+ * throw IllegalStateException if called before it's ready. We never let those
+ * escape — the app must degrade gracefully to the overlay path.
  */
 object ShizukuBridge {
 
@@ -32,7 +27,6 @@ object ShizukuBridge {
 
     @Volatile private var service: IShellService? = null
     @Volatile private var binding = false
-    private val bindLatch = ThreadLocal<CountDownLatch?>()
 
     private val userServiceArgs = Shizuku.UserServiceArgs(
         ComponentName("com.islandyout.tapforge", ShellUserService::class.java.name)
@@ -55,8 +49,9 @@ object ShizukuBridge {
     }
 
     fun hasPermission(): Boolean {
-        if (!isAvailable()) return false
         return try {
+            if (!Shizuku.pingBinder()) return false
+            if (Shizuku.isPreV11()) return false
             Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
         } catch (_: Throwable) {
             false
@@ -65,9 +60,10 @@ object ShizukuBridge {
 
     /** Call from an Activity. Result arrives via Shizuku.OnRequestPermissionResultListener. */
     fun requestPermission() {
-        if (!isAvailable()) return
         try {
-            if (Shizuku.isPreV11()) return // unsupported ancient version
+            if (!Shizuku.pingBinder()) return
+            if (Shizuku.isPreV11()) return
+            if (Shizuku.shouldShowRequestPermissionRationale()) return
             Shizuku.requestPermission(REQUEST_CODE)
         } catch (_: Throwable) {
         }
@@ -75,16 +71,17 @@ object ShizukuBridge {
 
     /**
      * Ensures the privileged UserService is bound. Blocks the calling thread
-     * (briefly) waiting for the bind to complete — call off the main thread.
+     * briefly waiting for the bind — call off the main thread.
      */
     private fun ensureService(): IShellService? {
-        service?.let { if (it.asBinder().pingBinder()) return it }
+        service?.let { s ->
+            try { if (s.asBinder().pingBinder()) return s } catch (_: Throwable) { service = null }
+        }
         if (!hasPermission()) return null
         if (binding) {
-            // Another thread is already binding; wait a moment for it.
-            repeat(50) {
-                if (!binding) return@repeat
-                Thread.sleep(50)
+            repeat(100) {
+                if (!binding) return service
+                try { Thread.sleep(50) } catch (_: InterruptedException) { return service }
             }
             return service
         }
@@ -97,6 +94,7 @@ object ShizukuBridge {
             }
             override fun onServiceDisconnected(name: ComponentName?) {
                 connection.onServiceDisconnected(name)
+                latch.countDown()
             }
         }
         try {
@@ -105,7 +103,7 @@ object ShizukuBridge {
             binding = false
             return null
         }
-        latch.await(5, TimeUnit.SECONDS)
+        try { latch.await(6, TimeUnit.SECONDS) } catch (_: InterruptedException) {}
         binding = false
         return service
     }
@@ -114,7 +112,7 @@ object ShizukuBridge {
     fun exec(cmd: String): String {
         val svc = ensureService() ?: return "ERR: Shizuku service not bound"
         return try {
-            svc.exec(cmd)
+            svc.exec(cmd) ?: ""
         } catch (t: Throwable) {
             "ERR: ${t.message}"
         }
@@ -142,7 +140,7 @@ object ShizukuBridge {
     /** Reads and clears buffered output from a stream session. */
     fun readStream(sessionId: Int): String {
         val svc = service ?: return ""
-        return try { svc.readStream(sessionId) } catch (_: Throwable) { "" }
+        return try { svc.readStream(sessionId) ?: "" } catch (_: Throwable) { "" }
     }
 
     fun stopStream(sessionId: Int) {
@@ -152,18 +150,22 @@ object ShizukuBridge {
 
     /**
      * Finds the touchscreen's /dev/input/eventX path by scanning `getevent -i`
-     * output for a device with ABS_MT_POSITION_X capability. Device paths vary
-     * by phone, so this is detected at runtime rather than hardcoded.
+     * output for a device that reports ABS_MT_POSITION_X. Device paths vary by
+     * phone, so this is detected at runtime. Tracks the "current device" as the
+     * scanner walks each device block, and returns the one whose capability
+     * block contains the multitouch X axis.
      */
     fun findTouchDevice(): String? {
         val listing = exec("getevent -i")
+        if (listing.startsWith("ERR:")) return null
         var currentDevice: String? = null
-        listing.lineSequence().forEach { line ->
-            val t = line.trim()
-            if (t.startsWith("add device") && t.contains(":")) {
-                currentDevice = t.substringAfterLast(":").trim()
-            }
-            if (t.contains("ABS_MT_POSITION_X") && currentDevice != null) {
+        for (raw in listing.lineSequence()) {
+            val t = raw.trim()
+            // e.g. "add device 1: /dev/input/event3"
+            if (t.startsWith("add device")) {
+                val path = t.substringAfter(":", "").trim()
+                currentDevice = if (path.startsWith("/dev/input/")) path else null
+            } else if (t.contains("ABS_MT_POSITION_X") && currentDevice != null) {
                 return currentDevice
             }
         }
