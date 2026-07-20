@@ -62,6 +62,27 @@ class ClickerService : AccessibilityService() {
     private val targets = mutableListOf<Target>()
     private var density = 1f
 
+    // ---- recording ----
+    private var recording = false
+    private var recordOverlay: View? = null
+    private lateinit var recordBtn: TextView
+    private data class RecEvent(
+        val type: String,      // "tap" | "hold" | "swipe"
+        val x1: Float, val y1: Float,
+        val x2: Float = 0f, val y2: Float = 0f,
+        val delayMs: Long,     // gap since previous event started
+        val durationMs: Long   // hold/swipe duration; ignored for tap
+    )
+    private val recordedEvents = mutableListOf<RecEvent>()
+    private var recStartTime = 0L
+    private var recLastEventStart = 0L
+    // in-progress touch tracking
+    private var touchDownTime = 0L
+    private var touchDownX = 0f
+    private var touchDownY = 0f
+    private val tapMoveSlopPx get() = 18 * density
+    private val holdThresholdMs = 450L
+
     // =========================================================
     // Target = one draggable overlay marker (tap / hold / swipe)
     // =========================================================
@@ -216,9 +237,11 @@ class ClickerService : AccessibilityService() {
         }
 
         playBtn = pill("▶") { toggleRun() }
+        recordBtn = pill("⏺", 0xFFE05B5B.toInt()) { toggleRecording() }
         val drag = pill("✥", 0xFF9BD8B4.toInt()) {}
 
         col.addView(playBtn)
+        col.addView(recordBtn)
         col.addView(pill("＋") { addTarget("tap") })
         col.addView(pill("⇢", SWIPE_ACCENT) { addTarget("swipe") })
         col.addView(pill("⊕", 0xFFE0C43B.toInt()) { addTarget("hold") })
@@ -337,6 +360,103 @@ class ClickerService : AccessibilityService() {
             val stroke = GestureDescription.StrokeDescription(path, 0, duration.coerceAtLeast(1))
             dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
         } catch (_: Exception) {}
+    }
+
+    // =========================================================
+    // Recording
+    // =========================================================
+    private fun toggleRecording() = if (recording) stopRecording() else startRecording()
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun startRecording() {
+        if (running) { Toast.makeText(this, "Stop playback first", Toast.LENGTH_SHORT).show(); return }
+        stopRun()
+        recordedEvents.clear()
+        recStartTime = System.currentTimeMillis()
+        recLastEventStart = recStartTime
+
+        val overlay = View(this)
+        overlay.setBackgroundColor(0x18E05B5B) // faint red tint so it's obvious recording is live
+        overlay.setOnTouchListener { _, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    touchDownTime = System.currentTimeMillis()
+                    touchDownX = e.rawX; touchDownY = e.rawY
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val now = System.currentTimeMillis()
+                    val dur = now - touchDownTime
+                    val dx = e.rawX - touchDownX
+                    val dy = e.rawY - touchDownY
+                    val dist = kotlin.math.hypot(dx, dy)
+                    val delay = touchDownTime - recLastEventStart
+                    recLastEventStart = touchDownTime
+
+                    val ev = if (dist > tapMoveSlopPx) {
+                        RecEvent("swipe", touchDownX, touchDownY, e.rawX, e.rawY, delay.coerceAtLeast(0), dur.coerceAtLeast(20))
+                    } else if (dur >= holdThresholdMs) {
+                        RecEvent("hold", touchDownX, touchDownY, delayMs = delay.coerceAtLeast(0), durationMs = dur)
+                    } else {
+                        RecEvent("tap", touchDownX, touchDownY, delayMs = delay.coerceAtLeast(0), durationMs = 30)
+                    }
+                    recordedEvents.add(ev)
+                    handler.post {
+                        Toast.makeText(this, "${recordedEvents.size} · ${ev.type}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            true
+        }
+
+        val p = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+
+        wm.addView(overlay, p)
+        recordOverlay = overlay
+        recording = true
+        recordBtn.text = "⏹"
+        recordBtn.setTextColor(ACCENT)
+        Toast.makeText(this, "Recording — tap/hold/swipe on screen. Press ⏹ when done.", Toast.LENGTH_LONG).show()
+    }
+
+    private fun stopRecording() {
+        recording = false
+        recordOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        recordOverlay = null
+        recordBtn.text = "⏺"
+        recordBtn.setTextColor(0xFFE05B5B.toInt())
+
+        if (recordedEvents.isEmpty()) {
+            Toast.makeText(this, "No actions recorded", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // Replace current targets with the recorded sequence.
+        targets.forEach { it.remove() }; targets.clear()
+        recordedEvents.forEachIndexed { i, ev ->
+            val t = Target(ev.type)
+            t.p1.x = ev.x1.roundToInt(); t.p1.y = ev.y1.roundToInt()
+            try { wm.updateViewLayout(t.v1, t.p1) } catch (_: Exception) {}
+            if (ev.type == "swipe") {
+                t.p2!!.x = ev.x2.roundToInt(); t.p2.y = ev.y2.roundToInt()
+                try { wm.updateViewLayout(t.v2!!, t.p2) } catch (_: Exception) {}
+            }
+            t.relabel(i + 1)
+            targets.add(t)
+        }
+        // Use the recorded timing: set global interval to the average gap,
+        // and per-type durations to the last recorded values of that type.
+        val avgDelay = recordedEvents.map { it.delayMs }.filter { it > 0 }.average()
+        if (!avgDelay.isNaN()) intervalMs = avgDelay.toLong().coerceAtLeast(10)
+        recordedEvents.lastOrNull { it.type == "swipe" }?.let { swipeDurationMs = it.durationMs }
+        recordedEvents.lastOrNull { it.type == "hold" }?.let { holdDurationMs = it.durationMs }
+        saveSettings()
+        saveScript()
+        Toast.makeText(this, "Recorded ${recordedEvents.size} actions — saved as script. Press ▶ to replay.", Toast.LENGTH_LONG).show()
     }
 
     // =========================================================
@@ -485,6 +605,7 @@ class ClickerService : AccessibilityService() {
 
     override fun onDestroy() {
         stopRun()
+        recordOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         targets.forEach { it.remove() }
         panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         controllerView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
