@@ -163,18 +163,35 @@ object ShizukuBridge {
      * output for a device that reports ABS_MT_POSITION_X.
      */
     fun findTouchDevice(): String? {
-        val listing = exec("getevent -i")
+        // Use `getevent -pl`: it prints capability NAMES (ABS_MT_POSITION_X),
+        // whereas `getevent -i` prints abbreviated hex codes on many devices
+        // (e.g. MIUI), so name-matching there fails. We look for the device
+        // block that advertises multitouch position or BTN_TOUCH + ABS_MT_SLOT.
+        val listing = exec("getevent -pl")
         if (listing.startsWith("ERR:")) return null
         var currentDevice: String? = null
+        var sawTouchSignal = false
+        var best: String? = null
         for (raw in listing.lineSequence()) {
             val t = raw.trim()
             if (t.startsWith("add device")) {
+                // commit the previous block if it looked like a touchscreen
+                if (sawTouchSignal && currentDevice != null && best == null) best = currentDevice
                 val path = t.substringAfter(":", "").trim()
                 currentDevice = if (path.startsWith("/dev/input/")) path else null
-            } else if (t.contains("ABS_MT_POSITION_X") && currentDevice != null) {
-                return currentDevice
+                sawTouchSignal = false
+            } else if (currentDevice != null) {
+                if (t.contains("ABS_MT_POSITION_X") ||
+                    t.contains("ABS_MT_POSITION") ||
+                    (t.contains("ABS_MT_SLOT") ) ||
+                    (t.contains("BTN_TOUCH") && t.contains("KEY"))) {
+                    sawTouchSignal = true
+                    // strongest signal — return immediately
+                    if (t.contains("ABS_MT_POSITION")) return currentDevice
+                }
             }
         }
-        return null
+        if (sawTouchSignal && currentDevice != null && best == null) best = currentDevice
+        return best
     }
 }
