@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TapForge</string>
+    <string name="service_desc">TapForge automates taps, long-presses and swipes on your screen. It only performs gestures you set up yourself with the floating controller. It does not read screen content.</string>
+</resources>
