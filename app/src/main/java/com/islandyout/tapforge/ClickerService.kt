@@ -345,6 +345,23 @@ class ClickerService : AccessibilityService() {
 
     private fun dispatchTarget(t: Target) {
         val (x1, y1) = t.center(t.v1)
+
+        if (ShizukuBridge.hasPermission()) {
+            // Shell-based injection: works even while the app is fully
+            // visible/interactive, no accessibility gesture needed.
+            Thread {
+                when (t.type) {
+                    "swipe" -> {
+                        val (x2, y2) = t.center(t.v2!!)
+                        ShizukuBridge.swipe(jx(x1).roundToInt(), jx(y1).roundToInt(), jx(x2).roundToInt(), jx(y2).roundToInt(), swipeDurationMs)
+                    }
+                    "hold" -> ShizukuBridge.hold(jx(x1).roundToInt(), jx(y1).roundToInt(), holdDurationMs)
+                    else -> ShizukuBridge.tap(jx(x1).roundToInt(), jx(y1).roundToInt())
+                }
+            }.start()
+            return
+        }
+
         val path = Path()
         val duration: Long
         when (t.type) {
@@ -365,6 +382,8 @@ class ClickerService : AccessibilityService() {
     // =========================================================
     // Recording
     // =========================================================
+    private var rawRecorder: RawInputRecorder? = null
+
     private fun toggleRecording() = if (recording) stopRecording() else startRecording()
 
     @SuppressLint("ClickableViewAccessibility")
@@ -375,6 +394,42 @@ class ClickerService : AccessibilityService() {
         recStartTime = System.currentTimeMillis()
         recLastEventStart = recStartTime
 
+        if (ShizukuBridge.hasPermission()) {
+            startRawRecording()
+        } else {
+            startOverlayRecording()
+        }
+    }
+
+    /** Shizuku path: reads raw touches from the kernel, no overlay — game stays visible and playable. */
+    private fun startRawRecording() {
+        val metrics = resources.displayMetrics
+        val recorder = RawInputRecorder(
+            screenWidthPx = metrics.widthPixels,
+            screenHeightPx = metrics.heightPixels,
+            onEvent = { ev ->
+                recordedEvents.add(RecEvent(ev.type, ev.x1.toFloat(), ev.y1.toFloat(), ev.x2.toFloat(), ev.y2.toFloat(), ev.delayMs, ev.durationMs))
+                handler.post { Toast.makeText(this, "${recordedEvents.size} · ${ev.type}", Toast.LENGTH_SHORT).show() }
+            },
+            onError = { msg ->
+                handler.post {
+                    Toast.makeText(this, "Raw recording failed: $msg — falling back", Toast.LENGTH_LONG).show()
+                    if (recording) { recording = false; startOverlayRecording() }
+                }
+            }
+        )
+        rawRecorder = recorder
+        recorder.start()
+        recording = true
+        recordBtn.text = "⏹"
+        recordBtn.setTextColor(ACCENT)
+        Toast.makeText(this, "Recording via Shizuku — play normally, screen stays live. Press ⏹ when done.", Toast.LENGTH_LONG).show()
+        handler.postDelayed(recordingSafetyStop, 120_000L)
+    }
+
+    /** Fallback path when Shizuku isn't set up: blocking overlay, screen goes dark-red while recording. */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun startOverlayRecording() {
         val overlay = View(this)
         overlay.setBackgroundColor(0x18E05B5B) // faint red tint so it's obvious recording is live
         overlay.setOnTouchListener { _, e ->
@@ -430,7 +485,8 @@ class ClickerService : AccessibilityService() {
         recording = true
         recordBtn.text = "⏹"
         recordBtn.setTextColor(ACCENT)
-        Toast.makeText(this, "Recording — tap/hold/swipe on screen. Press ⏹ when done.", Toast.LENGTH_LONG).show()
+        val tip = if (ShizukuBridge.isAvailable()) "Tip: grant TapForge's Shizuku permission to record without blocking the screen." else ""
+        Toast.makeText(this, "Recording — tap/hold/swipe on screen. Press ⏹ when done. $tip", Toast.LENGTH_LONG).show()
 
         // Safety valve: never let recording (and the blocking overlay) run
         // forever if something goes wrong — auto-stop after 2 minutes.
@@ -447,6 +503,7 @@ class ClickerService : AccessibilityService() {
     private fun stopRecording() {
         recording = false
         handler.removeCallbacks(recordingSafetyStop)
+        rawRecorder?.stop(); rawRecorder = null
         recordOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         recordOverlay = null
         recordBtn.text = "⏺"
@@ -628,6 +685,7 @@ class ClickerService : AccessibilityService() {
     override fun onDestroy() {
         stopRun()
         handler.removeCallbacks(recordingSafetyStop)
+        rawRecorder?.stop(); rawRecorder = null
         recordOverlay?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         targets.forEach { it.remove() }
         panelView?.let { try { wm.removeView(it) } catch (_: Exception) {} }

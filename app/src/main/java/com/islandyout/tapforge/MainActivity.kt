@@ -11,11 +11,18 @@ import android.view.Gravity
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import rikka.shizuku.Shizuku
 
 class MainActivity : Activity() {
 
     private var status: TextView? = null
+    private var shizukuStatus: TextView? = null
     private val d get() = resources.displayMetrics.density
+
+    private val shizukuPermListener = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
+        runOnUiThread { refreshShizukuStatus() }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -85,16 +92,46 @@ class MainActivity : Activity() {
             } else svc.toggleOverlay()
         })
 
+        val shSt = TextView(this)
+        shSt.textSize = 15f
+        shSt.setPadding((16 * d).toInt(), (14 * d).toInt(), (16 * d).toInt(), (14 * d).toInt())
+        val shBg = GradientDrawable()
+        shBg.setColor(0xFF162B20.toInt())
+        shBg.cornerRadius = 14 * d
+        shSt.background = shBg
+        val shLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        shLp.topMargin = (16 * d).toInt()
+        shSt.layoutParams = shLp
+        col.addView(shSt)
+        shizukuStatus = shSt
+
+        col.addView(button("3 · Grant Shizuku permission (optional)", false) {
+            if (!Shizuku.pingBinder()) {
+                Toast.makeText(this, "Shizuku isn't running — open the Shizuku app and start it first.", Toast.LENGTH_LONG).show()
+                return@button
+            }
+            if (Shizuku.isPreV11()) {
+                Toast.makeText(this, "Installed Shizuku version is too old.", Toast.LENGTH_LONG).show()
+                return@button
+            }
+            ShizukuBridge.requestPermission()
+        })
+
         val help = TextView(this)
         help.text = "\nHow to use\n\n" +
             "▶  start / pause the loop\n" +
+            "⏺  record real taps/swipes, ⏹ to stop and save\n" +
             "＋  add a tap target (drag it anywhere)\n" +
             "⇢  add a swipe (drag point A and point B)\n" +
             "⊕  add a long-press target\n" +
             "－  remove the last target\n" +
             "⚙  interval, durations, loops, anti-detection, save/load\n" +
             "✥  drag the controller bar itself\n\n" +
-            "Targets fire in numbered order, then the loop repeats."
+            "Targets fire in numbered order, then the loop repeats.\n\n" +
+            "With Shizuku granted (step 3), recording no longer blocks the " +
+            "screen — you can play normally while it records, and playback " +
+            "uses the same shell injection. Without it, recording uses a " +
+            "screen overlay instead."
         help.setTextColor(0xFFCFE8D8.toInt())
         help.textSize = 14f
         help.setPadding(0, (10 * d).toInt(), 0, 0)
@@ -103,11 +140,41 @@ class MainActivity : Activity() {
         setContentView(ScrollView(this).apply { addView(col) })
     }
 
+    override fun onStart() {
+        super.onStart()
+        Shizuku.addRequestPermissionResultListener(shizukuPermListener)
+    }
+
+    override fun onStop() {
+        Shizuku.removeRequestPermissionResultListener(shizukuPermListener)
+        super.onStop()
+    }
+
+    private fun refreshShizukuStatus() {
+        val sh = shizukuStatus ?: return
+        val available = try { Shizuku.pingBinder() } catch (_: Throwable) { false }
+        when {
+            !available -> {
+                sh.text = "Shizuku:  NOT RUNNING — install the Shizuku app and start it (see setup guide), then come back."
+                sh.setTextColor(0xFFE0C43B.toInt())
+            }
+            ShizukuBridge.hasPermission() -> {
+                sh.text = "Shizuku:  GRANTED ✓ — recording and playback will use it automatically (no screen overlay needed)."
+                sh.setTextColor(0xFF38E07B.toInt())
+            }
+            else -> {
+                sh.text = "Shizuku:  running, permission not granted yet — tap step 3."
+                sh.setTextColor(0xFFE0C43B.toInt())
+            }
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         val on = ClickerService.instance != null
         status?.text = if (on) "Service status:  RUNNING ✓  — use button 2 to toggle the controller"
         else "Service status:  OFF — tap step 1, find TapForge, switch it on"
         status?.setTextColor(if (on) 0xFF38E07B.toInt() else 0xFFE05B5B.toInt())
+        refreshShizukuStatus()
     }
 }
