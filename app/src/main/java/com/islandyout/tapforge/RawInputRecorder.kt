@@ -84,7 +84,7 @@ class RawInputRecorder(
     }
 
     private fun readRawRanges(device: String) {
-        val info = ShizukuBridge.exec("getevent -i $device")
+        val info = ShizukuBridge.exec("getevent -pl $device")
         Regex("ABS_MT_POSITION_X\\s*:.*?max\\s+(\\d+)").find(info)?.let {
             rawMaxX = it.groupValues[1].toIntOrNull() ?: 0
         }

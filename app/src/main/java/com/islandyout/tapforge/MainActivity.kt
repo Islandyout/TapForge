@@ -117,20 +117,22 @@ class MainActivity : Activity() {
             ShizukuBridge.requestPermission()
         })
 
-        col.addView(button("4 · Test Shizuku shell (diagnostic)", false) {
-            shSt.text = "Probing input devices\u2026"
+        col.addView(button("4 · Test recording path (diagnostic)", false) {
+            shSt.text = "Probing touchscreen\u2026"
             shSt.setTextColor(0xFFE0C43B.toInt())
             Thread {
-                val lsDev = ShizukuBridge.exec("ls -l /dev/input/")
-                val geteventI = ShizukuBridge.exec("getevent -i")
-                val geteventP = ShizukuBridge.exec("getevent -pl")
+                val dev = ShizukuBridge.findTouchDevice()
                 runOnUiThread {
-                    shSt.text = "RAW PROBE (send screenshot)\n\n" +
-                        "ls /dev/input:\n" + lsDev.take(400) + "\n\n" +
-                        "getevent -i (first 400):\n" + geteventI.take(400) + "\n\n" +
-                        "getevent -pl (first 500):\n" + geteventP.take(500)
-                    shSt.setTextColor(0xFFCFE8D8.toInt())
-                    shSt.textSize = 11f
+                    if (dev != null) {
+                        shSt.text = "READY \u2713  touch device: " + dev + "\n" +
+                            "Recording will use the no-overlay Shizuku path. " +
+                            "Show the controller (button 2), press \u23FA, play normally, press \u23F9 to save."
+                        shSt.setTextColor(0xFF38E07B.toInt())
+                    } else {
+                        shSt.text = "Touch device still not found. Tap button 4 again once, " +
+                            "and if it persists, send a screenshot."
+                        shSt.setTextColor(0xFFE05B5B.toInt())
+                    }
                 }
             }.apply { isDaemon = true; start() }
         })
