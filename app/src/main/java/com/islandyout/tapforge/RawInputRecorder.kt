@@ -1,15 +1,20 @@
 package com.islandyout.tapforge
 
-import rikka.shizuku.Shizuku
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
  * Records real touches while the screen underneath stays fully visible and
  * interactive — no overlay involved. Works by streaming raw kernel input
- * events (`getevent -lt`) from the touchscreen device through a Shizuku
- * shell process, parsing multitouch slot events into (x, y, down/up) with
- * real timestamps, and converting them into ClickerService.RecordedAction.
+ * events (`getevent -lt`) from the touchscreen device through Shizuku's
+ * privileged UserService (see ShellUserService / IShellService.aidl),
+ * parsing multitouch slot events into (x, y, down/up) with real timestamps,
+ * and converting them into RecordedAction.
+ *
+ * Output is polled rather than streamed directly, since a Binder connection
+ * to a UserService doesn't hand back a raw InputStream the way a local
+ * Process would — readStream() is called repeatedly on a background thread
+ * and returns whatever new lines have accumulated since the last poll.
  *
  * Coordinates from /dev/input are in the touch panel's raw range, which is
  * usually — but not always — 1:1 with screen pixels. We calibrate against
@@ -32,6 +37,7 @@ class RawInputRecorder(
 
     @Volatile private var running = false
     private var thread: Thread? = null
+    private var sessionId = -1
     private var rawMaxX = 0
     private var rawMaxY = 0
 
@@ -40,17 +46,22 @@ class RawInputRecorder(
             onError("Shizuku permission not granted")
             return
         }
-        val device = ShizukuBridge.findTouchDevice()
-        if (device == null) {
-            onError("Couldn't find the touchscreen input device")
-            return
-        }
-        readRawRanges(device)
-
-        running = true
         thread = Thread {
             try {
-                streamEvents(device)
+                val device = ShizukuBridge.findTouchDevice()
+                if (device == null) {
+                    onError("Couldn't find the touchscreen input device")
+                    return@Thread
+                }
+                readRawRanges(device)
+
+                sessionId = ShizukuBridge.startStream("getevent -lt $device")
+                if (sessionId < 0) {
+                    onError("Couldn't start the input stream")
+                    return@Thread
+                }
+                running = true
+                pollLoop()
             } catch (t: Throwable) {
                 onError("Recording stopped: ${t.message}")
             }
@@ -59,6 +70,8 @@ class RawInputRecorder(
 
     fun stop() {
         running = false
+        if (sessionId >= 0) ShizukuBridge.stopStream(sessionId)
+        sessionId = -1
         thread?.interrupt()
         thread = null
     }
@@ -74,30 +87,36 @@ class RawInputRecorder(
     private fun toScreenY(raw: Int) = if (rawMaxY > 0) (raw.toFloat() / rawMaxY * screenHeightPx).roundToInt() else raw
 
     /**
-     * Streams `getevent -lt <device>` and parses a single-finger touch
-     * sequence. Multitouch slots beyond finger 0 are ignored — this app
-     * automates single-finger taps/swipes, not multi-finger gestures.
+     * Polls the UserService for newly-buffered getevent output and parses a
+     * single-finger touch sequence. Multitouch slots beyond finger 0 are
+     * ignored — this app automates single-finger taps/swipes, not
+     * multi-finger gestures. Line timestamps from getevent are ignored in
+     * favor of wall-clock arrival time; polling adds a few ms of jitter,
+     * which is well within the anti-detection jitter already applied on
+     * playback.
      */
-    private fun streamEvents(device: String) {
-        val process = Shizuku.newProcess(arrayOf("sh", "-c", "getevent -lt $device"), null, null)
-        val reader = process.inputStream.bufferedReader()
-
+    private fun pollLoop() {
         var curX = 0; var curY = 0
         var downTime = 0L
         var downX = 0; var downY = 0
         var touching = false
         var lastEventStart = System.currentTimeMillis()
-        var lastLineTime = 0.0
+        var carry = "" // partial last line across polls
 
-        try {
-            var line: String?
-            while (running && reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
-                // Format: "[   12345.678901] EV_ABS       ABS_MT_POSITION_X   0000015e"
-                val tsMatch = Regex("\\[\\s*(\\d+\\.\\d+)\\]").find(l) ?: continue
-                lastLineTime = tsMatch.groupValues[1].toDoubleOrNull() ?: lastLineTime
-                val nowMs = System.currentTimeMillis() // wall clock is fine; kernel ts only used for relative ordering
+        while (running) {
+            val chunk = ShizukuBridge.readStream(sessionId)
+            if (chunk.isEmpty()) {
+                Thread.sleep(40)
+                continue
+            }
+            val text = carry + chunk
+            val lines = text.split("\n")
+            carry = if (!text.endsWith("\n")) lines.last() else ""
+            val completeLines = if (!text.endsWith("\n")) lines.dropLast(1) else lines
 
+            for (l in completeLines) {
+                if (l.isBlank()) continue
+                val nowMs = System.currentTimeMillis()
                 when {
                     l.contains("ABS_MT_POSITION_X") -> {
                         val hex = l.trim().substringAfterLast(' ')
@@ -107,14 +126,16 @@ class RawInputRecorder(
                         val hex = l.trim().substringAfterLast(' ')
                         curY = toScreenY(hex.toIntOrNull(16) ?: curY)
                     }
-                    l.contains("BTN_TOUCH") && l.contains("DOWN") || l.contains("ABS_MT_TRACKING_ID") && !l.trim().endsWith("ffffffff") -> {
+                    (l.contains("BTN_TOUCH") && l.contains("DOWN")) ||
+                    (l.contains("ABS_MT_TRACKING_ID") && !l.trim().endsWith("ffffffff")) -> {
                         if (!touching) {
                             touching = true
                             downTime = nowMs
                             downX = curX; downY = curY
                         }
                     }
-                    l.contains("BTN_TOUCH") && l.contains("UP") || l.contains("ABS_MT_TRACKING_ID") && l.trim().endsWith("ffffffff") -> {
+                    (l.contains("BTN_TOUCH") && l.contains("UP")) ||
+                    (l.contains("ABS_MT_TRACKING_ID") && l.trim().endsWith("ffffffff")) -> {
                         if (touching) {
                             touching = false
                             val dur = nowMs - downTime
@@ -132,8 +153,7 @@ class RawInputRecorder(
                     }
                 }
             }
-        } finally {
-            try { process.destroy() } catch (_: Exception) {}
+            Thread.sleep(20)
         }
     }
 }
